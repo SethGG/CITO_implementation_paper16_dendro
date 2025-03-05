@@ -10,7 +10,8 @@ def generate_wood_block(seed, resolution=(800, 600),
                         early_wood_gray_range=(175, 200),
                         late_wood_width_range=(6, 12),
                         late_wood_gray_range=(50, 75),
-                        rot_deg=0):
+                        rot_deg_height=0,
+                        rot_deg_width=0):
     # fix seed
     np.random.seed(seed)
 
@@ -18,24 +19,38 @@ def generate_wood_block(seed, resolution=(800, 600),
     width, height = resolution
 
     # calculate required full image size for rotation
-    rot_rad = rot_deg * np.pi/180
-    b1 = np.tan(rot_rad) * depth
-    b = height + b1
-    d = np.cos(rot_rad) * b
+    rot_rad_height = rot_deg_height * np.pi/180
+    b1_height = np.tan(rot_rad_height) * depth
+    b_height = height + b1_height
+    d_height = np.cos(rot_rad_height) * b_height
 
-    resize_height = int(d)
-    resize_width = int(d / height * width)
-    stretch_height = int(b)
+    resize_height_for_height = int(d_height)
+    resize_width_for_height = int(d_height / height * width)
+    stretch_height = int(b_height)
+
+    rot_rad_width = rot_deg_width * np.pi/180
+    b1_width = np.tan(rot_rad_width) * depth
+    b_width = width + b1_width
+    d_width = np.cos(rot_rad_width) * b_width
+
+    resize_height_for_width = int(d_width / width * height)
+    resize_width_for_width = int(d_width)
+    stretch_width = int(b_width)
+
+    final_resize_height = max(resize_height_for_height, resize_height_for_width)
+    final_resize_width = max(resize_width_for_height, resize_width_for_width)
+    final_stretch_height = final_resize_height / np.cos(rot_rad_height)
+    final_stretch_width = final_resize_width / np.cos(rot_rad_width)
 
     # create image with resize dimensions
-    image = np.zeros((resize_height, resize_width), dtype=np.uint8)
+    image = np.zeros((final_resize_height, final_resize_width), dtype=np.uint8)
 
     # generate the center point of the tree rings
-    cx = np.random.randint(resize_width)
-    cy = np.random.randint(resize_height)
+    cx = np.random.randint(final_resize_width)
+    cy = np.random.randint(final_resize_height)
 
     # determine the initial maximum ring size
-    ring_size = int(np.sqrt((resize_width + resize_height) ** 2))
+    ring_size = int(np.sqrt((final_resize_width + final_resize_height) ** 2))
 
     # randomly determine the wood type of the outermost ring
     use_early_wood = np.random.choice([True, False])
@@ -54,9 +69,9 @@ def generate_wood_block(seed, resolution=(800, 600),
 
         # detect if the ring does outside of image bounds
         x_min = max(0, cx - ring_size)
-        x_max = min(resize_width, cx + ring_size)
+        x_max = min(final_resize_width, cx + ring_size)
         y_min = max(0, cy - ring_size)
-        y_max = min(resize_height, cy + ring_size)
+        y_max = min(final_resize_height, cy + ring_size)
         y_indices, x_indices = np.ogrid[y_min:y_max, x_min:x_max]
         # determine distance from each point to the circle center
         distances_sq = (x_indices - cx)**2 + (y_indices - cy)**2
@@ -70,15 +85,18 @@ def generate_wood_block(seed, resolution=(800, 600),
         # flip the wood type for the next ring
         use_early_wood = ~use_early_wood
 
-    if resize_height != stretch_height:
+    if final_resize_height < final_stretch_height or final_resize_width < final_stretch_width:
         # stretch the image in the height of the rings are at a vertical angle
-        image = util.img_as_ubyte(transform.resize(image, (stretch_height, resize_width)))
+        image = util.img_as_ubyte(transform.resize(image, (final_stretch_height, final_stretch_width)))
 
     # create the 3d array by moving linearly over the strechted image with the original height window
     image3d = np.array([image[
-        int(i*(stretch_height-height)/depth):int(height+i*(stretch_height-height)/depth),
-        int(resize_width/2-width/2):int(resize_width/2+width/2)] for i in range(depth)])
+        int((final_stretch_height-stretch_height)/2) + int(i*(stretch_height-height)/depth):
+        int((final_stretch_height-stretch_height)/2) + int(height + i*(stretch_height-height)/depth),
+        int((final_stretch_width-stretch_width)/2) + int(i*(stretch_width-width)/depth):
+        int((final_stretch_width-stretch_width)/2) + int(width + i*(stretch_width-width)/depth)] for i in range(depth)])
 
+    breakpoint()
     return image3d
 
 
@@ -151,5 +169,5 @@ def interactive_slice_viewer(image3d):
 
 # Example usage:
 if __name__ == "__main__":
-    image3d = generate_wood_block(seed=1, rot_deg=20)
+    image3d = generate_wood_block(seed=1, rot_deg_height=45, rot_deg_width=0)
     interactive_slice_viewer(image3d)
