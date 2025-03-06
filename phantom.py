@@ -1,7 +1,13 @@
+"""
+CITO 24-25
+Daniël Zee (s2063131) and Martijn Combé (s2599406)
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, RadioButtons
 from skimage import transform, util
+from scipy.ndimage import gaussian_filter
 
 
 def generate_wood_block(seed, resolution=(800, 600),
@@ -11,7 +17,8 @@ def generate_wood_block(seed, resolution=(800, 600),
                         late_wood_width_range=(6, 12),
                         late_wood_gray_range=(50, 75),
                         rot_deg_height=0,
-                        rot_deg_width=0):
+                        rot_deg_width=0,
+                        gaussian_blur=2):
     # fix seed
     np.random.seed(seed)
 
@@ -19,7 +26,7 @@ def generate_wood_block(seed, resolution=(800, 600),
     width, height = resolution
 
     # calculate required full image size for rotation
-    rot_rad_height = rot_deg_height * np.pi/180
+    rot_rad_height = np.deg2rad(rot_deg_height)
     b1_height = np.tan(rot_rad_height) * depth
     b_height = height + b1_height
     d_height = np.cos(rot_rad_height) * b_height
@@ -28,7 +35,7 @@ def generate_wood_block(seed, resolution=(800, 600),
     resize_width_for_height = int(d_height / height * width)
     stretch_height = int(b_height)
 
-    rot_rad_width = rot_deg_width * np.pi/180
+    rot_rad_width = np.deg2rad(rot_deg_width)
     b1_width = np.tan(rot_rad_width) * depth
     b_width = width + b1_width
     d_width = np.cos(rot_rad_width) * b_width
@@ -89,6 +96,10 @@ def generate_wood_block(seed, resolution=(800, 600),
         # stretch the image in the height of the rings are at a vertical angle
         image = util.img_as_ubyte(transform.resize(image, (final_stretch_height, final_stretch_width)))
 
+    if gaussian_blur > 0:
+        # add gaussian blus to the wood rings
+        image = gaussian_filter(image, sigma=gaussian_blur)
+
     # create the 3d array by moving linearly over the strechted image with the original height window
     image3d = np.array([image[
         int((final_stretch_height-stretch_height)/2) + int(i*(stretch_height-height)/depth):
@@ -96,7 +107,6 @@ def generate_wood_block(seed, resolution=(800, 600),
         int((final_stretch_width-stretch_width)/2) + int(i*(stretch_width-width)/depth):
         int((final_stretch_width-stretch_width)/2) + int(width + i*(stretch_width-width)/depth)] for i in range(depth)])
 
-    breakpoint()
     return image3d
 
 
@@ -169,5 +179,5 @@ def interactive_slice_viewer(image3d):
 
 # Example usage:
 if __name__ == "__main__":
-    image3d = generate_wood_block(seed=1, rot_deg_height=45, rot_deg_width=0)
+    image3d = generate_wood_block(seed=1, rot_deg_height=0, rot_deg_width=0)
     interactive_slice_viewer(image3d)
