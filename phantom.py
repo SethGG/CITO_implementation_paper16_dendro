@@ -107,7 +107,12 @@ def generate_wood_block(seed, resolution=(800, 600),
         int((final_stretch_width-stretch_width)/2) + int(i*(stretch_width-width)/depth):
         int((final_stretch_width-stretch_width)/2) + int(width + i*(stretch_width-width)/depth)] for i in range(depth)])
 
-    return image3d
+    slices_cx = np.array([cx - int(i*(stretch_width-width)/depth) for i in range(depth)])
+    slices_cy = np.array([cy - int(i*(stretch_height-height)/depth) for i in range(depth)])
+
+    slices_c = list(zip(slices_cx, slices_cy))
+
+    return image3d, slices_c
 
 
 def interactive_slice_viewer(image3d):
@@ -179,5 +184,5 @@ def interactive_slice_viewer(image3d):
 
 # Example usage:
 if __name__ == "__main__":
-    image3d = generate_wood_block(seed=1, rot_deg_height=0, rot_deg_width=0)
+    image3d, _ = generate_wood_block(seed=2, rot_deg_height=7, rot_deg_width=7)
     interactive_slice_viewer(image3d)
