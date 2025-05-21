@@ -107,8 +107,14 @@ def generate_wood_block(seed, resolution=(800, 600),
         int((final_stretch_width-stretch_width)/2) + int(i*(stretch_width-width)/depth):
         int((final_stretch_width-stretch_width)/2) + int(width + i*(stretch_width-width)/depth)] for i in range(depth)])
 
-    slices_cx = np.array([cx - int(i*(stretch_width-width)/depth) for i in range(depth)])
-    slices_cy = np.array([cy - int(i*(stretch_height-height)/depth) for i in range(depth)])
+    cx_stretched = int(cx * final_stretch_width / final_resize_width)
+    cy_stretched = int(cy * final_stretch_height / final_resize_height)
+
+    offset_x = int((final_stretch_width - stretch_width) / 2)
+    offset_y = int((final_stretch_height - stretch_height) / 2)
+
+    slices_cx = np.array([cx_stretched - int(i*(stretch_width-width)/depth) - offset_x for i in range(depth)])
+    slices_cy = np.array([cy_stretched - int(i*(stretch_height-height)/depth) - offset_y for i in range(depth)])
 
     slices_c = list(zip(slices_cx, slices_cy))
 
