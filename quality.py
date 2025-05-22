@@ -92,7 +92,7 @@ def bp73_standardize(widths):
     return np.array(standardized)
 
 
-# Step 4: Compute TBP
+# Step 4: Compute TBP anf GL
 
 def compute_tbp_bp73(series1, series2):
     min_len = min(len(series1), len(series2))
@@ -106,6 +106,15 @@ def compute_tbp_bp73(series1, series2):
     n = len(s1)
     tbp = 100.0 if abs(r) == 1.0 else min(100, (r * np.sqrt(n - 2)) / np.sqrt(1 - r**2))
     return tbp, r
+
+
+def compute_gl(series1, series2):
+    min_len = min(len(series1), len(series2))
+    s1 = np.diff(series1[:min_len])
+    s2 = np.diff(series2[:min_len])
+    valid = (s1 != 0) & (s2 != 0)
+    agree = (np.sign(s1[valid]) == np.sign(s2[valid])).sum()
+    return 100 * agree / valid.sum() if valid.sum() > 0 else np.nan
 
 # Helper functions to compare ring detection
 
@@ -136,12 +145,15 @@ def plot_peak_detection(deg_1, profile_1, derivative_1, peaks_1, ring_widths_1,
 # Plot radial correlation and ring numbers in recontruction
 
 
-def plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_num_rings, image, center, image_recon):
+def plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_gl, all_num_rings, image, center, image_recon):
+    angles = angles - bl_theta
+
     fig = plt.figure(figsize=(12, 10))
     ax0 = fig.add_subplot(221)
-    ax3 = fig.add_subplot(223)
-    ax1 = fig.add_subplot(222, polar=True)
-    ax2 = fig.add_subplot(224, polar=True)
+    ax3 = fig.add_subplot(222)
+    ax1 = fig.add_subplot(234, polar=True)
+    ax4 = fig.add_subplot(235, polar=True)
+    ax2 = fig.add_subplot(236, polar=True)
 
     ax1.plot(angles, all_r, color='blue', label='Correlation (r)')
     ax1.fill(angles, all_r, color='skyblue', alpha=0.3)
@@ -156,6 +168,13 @@ def plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_num_rings, i
     ax2.set_theta_direction(-1)        # Counterclockwise
     # ax2.set_title("Radial number of tree-rings")
     ax2.legend(loc='upper right')
+
+    ax4.plot(angles, all_gl, color='green', label='Gleichläufigkeit (GL)')
+    ax4.fill(angles, all_gl, color='limegreen', alpha=0.3)
+    ax4.set_theta_zero_location("N", offset=np.rad2deg(-bl_theta)+270)  # 0° at the right
+    ax4.set_theta_direction(-1)        # Counterclockwise
+    # ax1.set_title("Radial correlation of ring widths to baseline profile")
+    ax4.legend(loc='upper right')
 
     ax0.imshow(image, cmap='gray')
     ax0.set_title("Phantom ground truth")
@@ -302,6 +321,7 @@ if __name__ == "__main__":
     all_standard_ring_widths = []
 
     all_r = []
+    all_gl = []
 
     angles = np.deg2rad(np.arange(360)) + bl_theta
 
@@ -317,25 +337,27 @@ if __name__ == "__main__":
         all_standard_ring_widths.append(standard_ring_widths)
         tbp, r = compute_tbp_bp73(bl_standard_ring_widths, standard_ring_widths)
         all_r.append(r)
+        gl = compute_gl(bl_ring_widths, ring_widths)
+        all_gl.append(gl)
 
     all_num_rings = [len(x) for x in all_ring_widths]
 
-    # plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_num_rings, image, center, image_recon)
+    plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_gl, all_num_rings, image, center, image_recon)
 
-    score, segments = dp_segmented_correlation_precomputed(
-        reference=bl_standard_ring_widths,
-        recon_segments=all_standard_ring_widths
-    )
+    # score, segments = dp_segmented_correlation_precomputed(
+    #     reference=bl_standard_ring_widths,
+    #     recon_segments=all_standard_ring_widths
+    # )
 
-    print(f"DP Optimal Weighted Correlation Score: {score:.3f}")
-    for start, end, angle_idx, r in segments:
-        print(f"Rings {start}-{end} → angle {angle_idx} → r = {r:.3f}")
+    # print(f"DP Optimal Weighted Correlation Score: {score:.3f}")
+    # for start, end, angle_idx, r in segments:
+    #     print(f"Rings {start}-{end} → angle {angle_idx} → r = {r:.3f}")
 
-    plot_segment_marks_on_image(
-        image=image_recon,
-        center=center,
-        segments=segments,
-        angles=angles,
-        ring_boundaries_all=all_peaks,
-        pixel_step=0.5
-    )
+    # plot_segment_marks_on_image(
+    #     image=image_recon,
+    #     center=center,
+    #     segments=segments,
+    #     angles=angles,
+    #     ring_boundaries_all=all_peaks,
+    #     pixel_step=0.5
+    # )
