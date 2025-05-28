@@ -1,10 +1,15 @@
 import numpy as np
 from scipy.ndimage import map_coordinates
 from phantom import generate_wood_block, interactive_slice_viewer
+from sinogram import create_reconstruction
 import matplotlib.pyplot as plt
-from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
+from scipy.signal import find_peaks, savgol_filter
 from scipy.stats import pearsonr
 from scipy.ndimage import gaussian_filter
+from joblib import Parallel, delayed
+import os
+from tqdm import tqdm
+
 
 # Helper functions for radius and angle calculations
 
@@ -67,7 +72,7 @@ def extract_radial_profile(image, center, theta, radius, pixel_step=0.5):
 # Step 2: Derivative of radial profile to find ring boundaries
 
 
-def find_ring_boundaries(profile, smoothing_window=20, prominence=0.01):
+def find_ring_boundaries(profile, smoothing_window=20, prominence=0.1):
     derivative = savgol_filter(profile, window_length=smoothing_window, polyorder=1, deriv=1)
     peaks_max, _ = find_peaks(derivative, prominence=prominence*np.mean(np.abs(derivative)))
     peaks_min, _ = find_peaks(-derivative, prominence=prominence*np.mean(np.abs(derivative)))
@@ -194,54 +199,84 @@ def plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_gl, all_num_
 # Dynamic programming for best segmented correlation
 
 
-def dp_segmented_correlation_precomputed(reference, recon_segments, min_segment_len=20, max_segment_len=40):
+def dp_segmented_correlation(reference, recon_segments, min_segment_len=20, max_segment_len=40, shift_max=2):
     N = len(reference)
     A = len(recon_segments)
     dp = [-np.inf] * (N + 1)
     backtrack = [None] * (N + 1)
     dp[0] = 0.0
 
-    # Precompute correlations for all segments
-    print("Precompute correlations for all segments")
+    def fast_corr(x, y):
+        if len(x) != len(y):
+            raise ValueError("series are not of equal length")
+        if len(x) < 2 or len(y) < 2:
+            raise ValueError("series have to be at least length 2")
+        x = np.asarray(x)
+        y = np.asarray(y)
+        x -= x.mean()
+        y -= y.mean()
+        denom = np.linalg.norm(x) * np.linalg.norm(y)
+        return np.dot(x, y) / denom if denom != 0 else 0
+
+    def best_shifted_corr(ref_seg, recon_seg, j, i, shift_max):
+        max_r = -np.inf
+        best_start = None
+        seg_len = i - j
+        for s in range(-shift_max, shift_max + 1):
+            # Forward
+            start = j + s
+            end = start + seg_len
+            if 0 <= start < end <= len(recon_seg):
+                r = fast_corr(ref_seg, recon_seg[start:end])
+                if r > max_r:
+                    max_r = r
+                    best_start = start
+            # # Backward
+            # recon_end = len(recon_seg) - (N - i)
+            # end = recon_end + s
+            # start = end - seg_len
+            # if 0 <= start < end <= len(recon_seg):
+            #     r = fast_corr(ref_seg, recon_seg[start:end])
+            #     if r > max_r:
+            #         max_r = r
+            #         best_start = start
+        return (max_r, best_start) if max_r != -np.inf else (None, None)
+
     corr = {}
+    offsets = {}
     for j in range(N):
         for i in range(j + min_segment_len, min(N, j + max_segment_len) + 1):
-            ref_seg = reference[j:i]
-            if len(ref_seg) < 2:
+            if i - j < 2:
                 continue
-            for angle_idx, recon_seg in enumerate(recon_segments):
-                if len(recon_seg) < i:  # Must be able to slice j:i
-                    continue
-                recon_sub = recon_seg[j:i]
-                if len(recon_sub) < 2:
-                    continue
-                r, _ = pearsonr(ref_seg, recon_sub)
-                corr[(j, i, angle_idx)] = r
+            ref_seg = reference[j:i]
+            for a in range(A):
+                r, best_start = best_shifted_corr(ref_seg, recon_segments[a], j, i, shift_max)
+                if r is not None:
+                    corr[(j, i, a)] = r
+                    offsets[(j, i, a)] = best_start
 
-    # Run DP using the precomputed correlations
-    print("Run DP using the precomputed correlations")
     for i in range(min_segment_len, N + 1):
         for j in range(max(0, i - max_segment_len), i - min_segment_len + 1):
-            for angle_idx in range(A):
-                r = corr.get((j, i, angle_idx), None)
-                if r is None:
+            for a in range(A):
+                r = corr.get((j, i, a), None)
+                best_start = offsets.get((j, i, a), None)
+                if r is None or best_start is None:
                     continue
                 weight = (i - j) / N
                 score = dp[j] + weight * r
                 if score > dp[i]:
                     dp[i] = score
-                    backtrack[i] = (j, i, angle_idx, r)
+                    backtrack[i] = (j, i, a, r, best_start)
 
-    # Reconstruct best path
-    print("Reconstruct best path")
-    i = N
     best_segments = []
+    i = N
     while i > 0 and backtrack[i] is not None:
         seg = backtrack[i]
         best_segments.insert(0, seg)
         i = seg[0]
 
     return dp[N], best_segments
+
 
 # Plot best tree ring segments found by DP on the image
 
@@ -253,7 +288,7 @@ def plot_segment_marks_on_image(image, center, segments, angles, ring_boundaries
     Parameters:
         image: 2D numpy array (reconstruction image)
         center: (x0, y0) tuple of ring center
-        segments: list of tuples (start, end, angle_idx, r) from DP
+        segments: list of tuples (start, end, angle_idx, r, recon_start_idx)
         angles: list/array of angles in radians, where index matches angle_idx
         ring_boundaries_all: list of peaks arrays from each angle's profile (i.e., all_peaks)
         pixel_step: spacing between radial samples (used in extract_radial_profile)
@@ -264,15 +299,19 @@ def plot_segment_marks_on_image(image, center, segments, angles, ring_boundaries
 
     x0, y0 = center
 
-    for (start, end, angle_idx, _) in segments:
+    for (start, end, angle_idx, _, recon_start_idx) in segments:
         theta = angles[angle_idx]
         ring_peaks = ring_boundaries_all[angle_idx]
 
-        # Account for +2 shift due to bp73_standardize
-        ring_start = start + 2
-        ring_end = end + 2
+        segment_len = end - start
+        ring_start = recon_start_idx + 2
+        ring_end = ring_start + segment_len
 
-        # Main used peaks
+        # Ensure indices are valid
+        if ring_start < 0 or ring_end > len(ring_peaks):
+            continue  # skip out-of-bounds segment
+
+        # Plot main segment peaks (green)
         main_peaks = ring_peaks[ring_start:ring_end]
         for r in main_peaks:
             radius = r * pixel_step
@@ -280,7 +319,7 @@ def plot_segment_marks_on_image(image, center, segments, angles, ring_boundaries
             y = y0 + radius * np.sin(theta)
             ax.plot(x, y, 'x', color='lime', markersize=6)
 
-        # Padding peaks (before and after)
+        # Plot ±2 padding peaks (magenta)
         pad_before = ring_peaks[max(0, ring_start - 2):ring_start]
         pad_after = ring_peaks[ring_end:ring_end + 2]
 
@@ -293,8 +332,115 @@ def plot_segment_marks_on_image(image, center, segments, angles, ring_boundaries
     plt.show()
 
 
-# Example usage:
-if __name__ == "__main__":
+def create_phantom_and_reconstruction(seed, rot_deg_height, rot_deg_width, cone_angle):
+    filename = f"seed_{seed}_roth_{rot_deg_height}_rotw_{rot_deg_width}_cangle{cone_angle}.npy"
+
+    if os.path.exists(f"phantom_{filename}") and os.path.exists(f"center_{filename}"):
+        image3d = np.load(f"phantom_{filename}")
+        slices_center = np.load(f"center_{filename}")
+    else:
+        image3d, slices_center = generate_wood_block(
+            seed=seed, rot_deg_height=rot_deg_height, rot_deg_width=rot_deg_width)
+        np.save(f"phantom_{filename}", image3d)
+        np.save(f"center_{filename}", slices_center)
+
+    if os.path.exists(f"recon_{filename}"):
+        recon3d = np.load(f"recon_{filename}")
+    else:
+        _, recon3d = create_reconstruction(image3d)
+        np.save(f"recon_{filename}", recon3d)
+
+    return image3d, slices_center, recon3d
+
+
+def process_and_score_slices(image3d, slices_center, reference_series, angles, output_prefix="recon",
+                             min_segment_len=20, max_segment_len=40, pixel_step=0.5, n_jobs=-1):
+
+    score_file = f"{output_prefix}_scores.npy"
+    seg_file = f"{output_prefix}_segments.npy"
+    peaks_file = f"{output_prefix}_peaks.npy"
+
+    if os.path.exists(score_file) and os.path.exists(seg_file) and os.path.exists(peaks_file):
+        scores = np.load(score_file, allow_pickle=True)
+        segments = np.load(seg_file, allow_pickle=True)
+        all_peaks = np.load(peaks_file, allow_pickle=True)
+        return scores, segments, all_peaks
+
+    def process_single_slice(slice_idx):
+        image = image3d[slice_idx]
+        center = slices_center[slice_idx]
+        peaks_per_angle = []
+        std_ring_widths_per_angle = []
+
+        for theta in angles:
+            radius = compute_radius_for_angle(image, center, theta)
+            profile = extract_radial_profile(image, center, theta, radius, pixel_step=pixel_step)
+            _, peaks, ring_widths = find_ring_boundaries(profile)
+            peaks_per_angle.append(peaks)
+            std_ring_widths = bp73_standardize(ring_widths)
+            std_ring_widths_per_angle.append(std_ring_widths)
+
+        score, segs = dp_segmented_correlation(reference_series, std_ring_widths_per_angle,
+                                               min_segment_len=min_segment_len,
+                                               max_segment_len=max_segment_len)
+        return score, segs, peaks_per_angle
+
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(process_single_slice)(i) for i in tqdm(range(len(image3d)))
+    )
+
+    scores, segments, all_peaks = zip(*results)
+    scores = np.array(scores)
+    segments = np.array(segments, dtype=object)
+    all_peaks = np.array(all_peaks, dtype=object)
+
+    np.save(score_file, scores)
+    np.save(seg_file, segments)
+    np.save(peaks_file, all_peaks)
+
+    return scores, segments, all_peaks
+
+
+def find_best_reconstruction_depth(seed):
+    image3d, slices_center, recon3d = create_phantom_and_reconstruction(
+        seed=seed, rot_deg_height=0, rot_deg_width=0, cone_angle=9)
+
+    bl_image = image3d[0]
+    bl_center = slices_center[0]
+
+    recon_center = [bl_center] * 100
+
+    # find the angle of and radius of the longest line from the center (baseline)
+    bl_theta = compute_angle_for_max_radius(bl_image, bl_center)
+    bl_radius = compute_radius_for_angle(bl_image, bl_center, bl_theta)
+    # extract radial baseline radial profile
+    bl_profile = extract_radial_profile(bl_image, bl_center, bl_theta, bl_radius)
+    # extract the ring edge locations anc calculate ring widths
+    _, _, bl_ring_widths = find_ring_boundaries(bl_profile)
+    # standardize the ring width series
+    bl_std_ring_widths = bp73_standardize(bl_ring_widths)
+
+    angles = np.deg2rad(np.arange(360)) + bl_theta
+
+    scores, segments, all_peaks = process_and_score_slices(recon3d, recon_center, bl_std_ring_widths, angles)
+
+    for score, segment, peaks, recon_image in zip(scores, segments, all_peaks, recon3d):
+        print(f"DP Optimal Weighted Correlation Score: {score:.3f}")
+
+        for start, end, angle_idx, r, recon_start_idx in segment:
+            print(f"Rings {start}-{end} → angle {angle_idx} → r = {r:.3f} → recon_start = {recon_start_idx}")
+
+        plot_segment_marks_on_image(
+            image=recon_image,
+            center=bl_center,
+            segments=segment,
+            angles=angles,
+            ring_boundaries_all=peaks,
+            pixel_step=0.5
+        )
+
+
+def test_on_gaussian():
     image3d, slices_center = generate_wood_block(seed=4, rot_deg_height=45, rot_deg_width=20)
 
     slice_num = 50
@@ -340,24 +486,34 @@ if __name__ == "__main__":
         gl = compute_gl(bl_ring_widths, ring_widths)
         all_gl.append(gl)
 
-    all_num_rings = [len(x) for x in all_ring_widths]
+    # all_num_rings = [len(x) for x in all_ring_widths]
 
-    plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_gl, all_num_rings, image, center, image_recon)
+    # plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_gl, all_num_rings, image, center, image_recon)
 
-    # score, segments = dp_segmented_correlation_precomputed(
-    #     reference=bl_standard_ring_widths,
-    #     recon_segments=all_standard_ring_widths
-    # )
+    score, segments = dp_segmented_correlation_shifted(
+        reference=bl_standard_ring_widths,
+        recon_segments=all_standard_ring_widths,
+        min_segment_len=20,
+        max_segment_len=40,
+        shift_max=3,
+        n_jobs=-1  # use all available CPU cores
+    )
 
-    # print(f"DP Optimal Weighted Correlation Score: {score:.3f}")
-    # for start, end, angle_idx, r in segments:
-    #     print(f"Rings {start}-{end} → angle {angle_idx} → r = {r:.3f}")
+    print(f"DP Optimal Weighted Correlation Score: {score:.3f}")
+    for start, end, angle_idx, r in segments:
+        print(f"Rings {start}-{end} → angle {angle_idx} → r = {r:.3f}")
 
-    # plot_segment_marks_on_image(
-    #     image=image_recon,
-    #     center=center,
-    #     segments=segments,
-    #     angles=angles,
-    #     ring_boundaries_all=all_peaks,
-    #     pixel_step=0.5
-    # )
+    plot_segment_marks_on_image(
+        image=image_recon,
+        center=center,
+        segments=segments,
+        angles=angles,
+        ring_boundaries_all=all_peaks,
+        pixel_step=0.5
+    )
+
+
+# Example usage:
+if __name__ == "__main__":
+    # test_on_gaussian()
+    find_best_reconstruction_depth(seed=4)
