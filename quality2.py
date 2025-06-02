@@ -317,14 +317,11 @@ def find_best_reconstruction_depth(phantom_recon):
         slices_ring_weighted_r.append(np.sum(all_ring_weigthed_r[~np.isnan(all_ring_weigthed_r)]))
         slices_average_r.append(np.mean(all_r[~np.isnan(all_r)]))
 
-        # Only for angles 0 to 45, 135 to 225, and 315 to 0
-        indices = np.concatenate([
-            np.arange(0, 46),
-            np.arange(135, 226),
-            np.arange(315, 360)
-        ])
-        all_num_rings_limited = all_num_rings[indices]
-        all_r_limited = all_r[indices]
+        # Only for angles with r above the 50th percentile
+        threshold_r = np.percentile(all_r[~np.isnan(all_r)], 50)
+        limited_indexes = all_r > threshold_r
+        all_num_rings_limited = all_num_rings[limited_indexes]
+        all_r_limited = all_r[limited_indexes]
 
         all_ring_weigthed_r_limited = ring_weighted_correlations(all_r_limited, all_num_rings_limited)
         slices_ring_weighted_r_limited.append(
