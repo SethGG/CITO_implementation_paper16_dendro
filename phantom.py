@@ -18,7 +18,8 @@ def generate_wood_block(seed, resolution=(800, 600),
                         late_wood_gray_range=(50, 75),
                         rot_deg_height=0,
                         rot_deg_width=0,
-                        gaussian_blur=2):
+                        gaussian_blur=2,
+                        center_pith=False):
     # fix seed
     np.random.seed(seed)
 
@@ -53,8 +54,12 @@ def generate_wood_block(seed, resolution=(800, 600),
     image = np.zeros((final_resize_height, final_resize_width), dtype=np.uint8)
 
     # generate the center point of the tree rings
-    cx = np.random.randint(final_resize_width)
-    cy = np.random.randint(final_resize_height)
+    if center_pith:
+        cx = final_resize_width // 2
+        cy = final_resize_height // 2
+    else:
+        cx = np.random.randint(final_resize_width)
+        cy = np.random.randint(final_resize_height)
 
     # determine the initial maximum ring size
     ring_size = int(np.sqrt((final_resize_width + final_resize_height) ** 2))

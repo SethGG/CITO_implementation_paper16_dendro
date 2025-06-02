@@ -1,13 +1,13 @@
 import numpy as np
 from scipy.ndimage import map_coordinates
-from phantom import generate_wood_block, interactive_slice_viewer
+from phantom import generate_wood_block
 from sinogram import create_reconstruction
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks, savgol_filter
-from scipy.ndimage import gaussian_filter
 from skimage.metrics import structural_similarity as ssim
 import os
 from tqdm import tqdm
+import imageio.v2 as imageio
 
 
 # Helper functions for radius and angle calculations
@@ -18,43 +18,32 @@ def compute_radius_for_angle(image, center, theta):
     x0, y0 = center
     dx, dy = np.cos(theta), np.sin(theta)
 
-    bounds = []
+    t_vals = []
 
+    # Intersect with vertical boundaries: x = 0 and x = width-1
     if dx != 0:
-        t1 = (0 - x0) / dx
-        t2 = (width - 1 - x0) / dx
-        bounds.extend([t for t in (t1, t2) if t > 0])
+        for x_bound in [0, width - 1]:
+            t = (x_bound - x0) / dx
+            if t <= 0:
+                continue
+            y = y0 + t * dy
+            if 0 <= y < height:
+                t_vals.append(t)
 
+    # Intersect with horizontal boundaries: y = 0 and y = height-1
     if dy != 0:
-        t3 = (0 - y0) / dy
-        t4 = (height - 1 - y0) / dy
-        bounds.extend([t for t in (t3, t4) if t > 0])
+        for y_bound in [0, height - 1]:
+            t = (y_bound - y0) / dy
+            if t <= 0:
+                continue
+            x = x0 + t * dx
+            if 0 <= x < width:
+                t_vals.append(t)
 
-    if not bounds:
-        return 0  # direction is completely away from image
+    if not t_vals:
+        return 0
 
-    return min(bounds)
-
-
-def compute_angle_for_max_radius(image, center):
-    height, width = image.shape
-    x0, y0 = center
-
-    # Define the four corners of the image
-    corners = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
-
-    max_dist_sq = 0
-    best_theta = 0
-
-    for x, y in corners:
-        dx = x - x0
-        dy = y - y0
-        dist_sq = dx**2 + dy**2
-        if dist_sq > max_dist_sq:
-            max_dist_sq = dist_sq
-            best_theta = np.arctan2(dy, dx)
-
-    return best_theta
+    return max(t_vals)
 
 
 # Step 1: Extract radial profile
@@ -65,13 +54,19 @@ def extract_radial_profile(image, center, theta, radius, pixel_step=0.5):
     radii = np.arange(0, radius, pixel_step)
     x_coords = x0 + radii * np.cos(theta)
     y_coords = y0 + radii * np.sin(theta)
-    profile = map_coordinates(image, [y_coords, x_coords], order=1)
+
+    height, width = image.shape
+    mask = (x_coords >= 0) & (x_coords < width) & (y_coords >= 0) & (y_coords < height)
+
+    profile = map_coordinates(image, [y_coords[mask], x_coords[mask]], order=1)
     return profile
 
 # Step 2: Derivative of radial profile to find ring boundaries
 
 
 def find_ring_boundaries(profile, smoothing_window=20, prominence=0.4):
+    if len(profile) < smoothing_window:
+        return [], [], []
     derivative = savgol_filter(profile, window_length=smoothing_window, polyorder=1, deriv=1)
     peaks_max, _ = find_peaks(derivative, prominence=prominence*np.mean(np.abs(derivative)), height=0)
     peaks_min, _ = find_peaks(-derivative, prominence=prominence*np.mean(np.abs(derivative)), height=0)
@@ -175,29 +170,48 @@ def plot_radial_correlation(angles, all_r, all_r_detrend, all_num_rings, image, 
     plt.show()
 
 
-def create_phantom_and_reconstruction(seed, rot_deg_height, rot_deg_width, depth_sample_interval, cone_angle_deg):
-    filename = \
-        f"seed_{seed}_roth_{rot_deg_height}_rotw_{rot_deg_width}_dsi_{depth_sample_interval}_cangle_{cone_angle_deg}.npy"
+def create_phantom_and_reconstruction(seed, rot_deg_height, rot_deg_width, depth_sample_interval,
+                                      cone_angle_deg, output_dir="output"):
+    # Define directories
+    phantom_dir = os.path.join(output_dir, "phantoms")
+    recon_dir = os.path.join(output_dir, "reconstructions")
+    os.makedirs(phantom_dir, exist_ok=True)
+    os.makedirs(recon_dir, exist_ok=True)
 
-    if os.path.exists(f"phantom_{filename}") and os.path.exists(f"center_{filename}"):
-        image3d = np.load(f"phantom_{filename}")
-        slices_center = np.load(f"center_{filename}")
-    else:
-        image3d, slices_center = generate_wood_block(
-            seed=seed, rot_deg_height=rot_deg_height, rot_deg_width=rot_deg_width)
-        np.save(f"phantom_{filename}", image3d)
-        np.save(f"center_{filename}", slices_center)
+    # Define base filename and slice subdirs
+    filename = f"seed_{seed}_roth_{rot_deg_height}_rotw_{rot_deg_width}_dsi_{depth_sample_interval}_cangle_{cone_angle_deg}"
+    phantom_path = os.path.join(phantom_dir, f"{filename}.npy")
+    center_path = os.path.join(phantom_dir, f"center_{filename}.npy")
+    recon_path = os.path.join(recon_dir, f"{filename}.npy")
+    recon_img_dir = os.path.join(recon_dir, filename)
 
-    if os.path.exists(f"recon_{filename}"):
-        recon3d = np.load(f"recon_{filename}")
+    # Load or generate phantom and center data
+    if os.path.exists(phantom_path) and os.path.exists(center_path):
+        full_image3d = np.load(phantom_path)
+        full_slices_center = np.load(center_path)
     else:
-        _, recon3d = create_reconstruction(image3d, depth_sample_interval=depth_sample_interval,
+        full_image3d, full_slices_center = generate_wood_block(
+            seed=seed, rot_deg_height=rot_deg_height, rot_deg_width=rot_deg_width, center_pith=True)
+        np.save(phantom_path, full_image3d)
+        np.save(center_path, full_slices_center)
+
+    # Subsample slices
+    image3d = full_image3d[::depth_sample_interval]
+    slices_center = full_slices_center[::depth_sample_interval]
+
+    # Load or generate reconstructions
+    if os.path.exists(recon_path):
+        recon3d = np.load(recon_path)
+    else:
+        _, recon3d = create_reconstruction(full_image3d, depth_sample_interval=depth_sample_interval,
                                            cone_angle_deg=cone_angle_deg)
-        np.save(f"recon_{filename}", recon3d)
+        np.save(recon_path, recon3d)
 
-    # get only the slices in the phantom which where reconstructed
-    image3d = image3d[::depth_sample_interval]
-    slices_center = slices_center[::depth_sample_interval]
+        # Save recon slices as images
+        os.makedirs(recon_img_dir, exist_ok=True)
+        for i, img in enumerate(recon3d):
+            img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
+            imageio.imwrite(os.path.join(recon_img_dir, f"recon_slice_{i:03d}.png"), img_uint8)
 
     return image3d, slices_center, recon3d
 
@@ -264,9 +278,8 @@ def ring_weighted_correlations(correlations, num_rings):
     return weights * correlations
 
 
-def find_best_reconstruction_depth(seed):
-    image3d, slices_center, recon3d = create_phantom_and_reconstruction(
-        seed=seed, rot_deg_height=0, rot_deg_width=0, depth_sample_interval=20, cone_angle_deg=9)
+def find_best_reconstruction_depth(phantom_recon):
+    image3d, slices_center, recon3d = phantom_recon
 
     angles = np.deg2rad(np.arange(360))
 
@@ -283,6 +296,11 @@ def find_best_reconstruction_depth(seed):
         for theta in angles:
             bl_radius = compute_radius_for_angle(phantom_slice, slice_center, theta)
             bl_profile = extract_radial_profile(phantom_slice, slice_center, theta, bl_radius)
+            if len(bl_profile) == 0:
+                all_ring_widths.append([])
+                all_r.append(np.nan)
+                continue
+
             _, _, bl_ring_widths = find_ring_boundaries(bl_profile)
             all_ring_widths.append(bl_ring_widths)
 
@@ -296,8 +314,8 @@ def find_best_reconstruction_depth(seed):
 
         # For all angles
         all_ring_weigthed_r = ring_weighted_correlations(all_r, all_num_rings)
-        slices_ring_weighted_r.append(np.sum(all_ring_weigthed_r))
-        slices_average_r.append(np.mean(all_r))
+        slices_ring_weighted_r.append(np.sum(all_ring_weigthed_r[~np.isnan(all_ring_weigthed_r)]))
+        slices_average_r.append(np.mean(all_r[~np.isnan(all_r)]))
 
         # Only for angles 0 to 45, 135 to 225, and 315 to 0
         indices = np.concatenate([
@@ -309,8 +327,9 @@ def find_best_reconstruction_depth(seed):
         all_r_limited = all_r[indices]
 
         all_ring_weigthed_r_limited = ring_weighted_correlations(all_r_limited, all_num_rings_limited)
-        slices_ring_weighted_r_limited.append(np.sum(all_ring_weigthed_r_limited))
-        slices_average_r_limited.append(np.mean(all_r_limited))
+        slices_ring_weighted_r_limited.append(
+            np.sum(all_ring_weigthed_r_limited[~np.isnan(all_ring_weigthed_r_limited)]))
+        slices_average_r_limited.append(np.mean(all_r_limited[~np.isnan(all_r_limited)]))
 
         # plot_radial_correlation(angles, all_r, all_ring_weigthed_r, all_num_rings,
         #                        phantom_slice, recon_slice)
@@ -319,80 +338,16 @@ def find_best_reconstruction_depth(seed):
                                         slices_ring_weighted_r_limited, slices_average_r_limited)
 
 
-def test_on_gaussian():
-    image3d, slices_center = generate_wood_block(seed=4, rot_deg_height=45, rot_deg_width=20)
-
-    slice_num = 50
-    image = image3d[slice_num]
-    center = slices_center[slice_num]
-
-    # find the angle of and radius of the longest line from the center (baseline)
-    bl_theta = compute_angle_for_max_radius(image, center)
-    bl_radius = compute_radius_for_angle(image, center, bl_theta)
-    # extract radial baseline radial profile
-    bl_profile = extract_radial_profile(image, center, bl_theta, bl_radius)
-    # extract the ring edge locations anc calculate ring widths
-    bl_derivative, bl_peaks, bl_ring_widths = find_ring_boundaries(bl_profile)
-    # standardize the ring width series
-    bl_standard_ring_widths = bp73_standardize(bl_ring_widths)
-
-    # Test on a noisy image as reconstruction placeholder
-    image_recon = gaussian_filter(image, sigma=5)
-
-    all_profiles = []
-    all_derivatives = []
-    all_peaks = []
-    all_ring_widths = []
-    all_standard_ring_widths = []
-
-    all_r = []
-    all_gl = []
-
-    angles = np.deg2rad(np.arange(360)) + bl_theta
-
-    for theta in angles:
-        radius = compute_radius_for_angle(image_recon, center, theta)
-        profile = extract_radial_profile(image_recon, center, theta, radius)
-        all_profiles.append(profile)
-        derivative, peaks, ring_widths = find_ring_boundaries(profile)
-        all_derivatives.append(derivative)
-        all_peaks.append(peaks)
-        all_ring_widths.append(ring_widths)
-        standard_ring_widths = bp73_standardize(ring_widths)
-        all_standard_ring_widths.append(standard_ring_widths)
-        tbp, r = compute_tbp_bp73(bl_standard_ring_widths, standard_ring_widths)
-        all_r.append(r)
-        gl = compute_gl(bl_ring_widths, ring_widths)
-        all_gl.append(gl)
-
-    # all_num_rings = [len(x) for x in all_ring_widths]
-
-    # plot_radial_correlation(angles, bl_theta, bl_radius, all_r, all_gl, all_num_rings, image, center, image_recon)
-
-    score, segments = dp_segmented_correlation_shifted(
-        reference=bl_standard_ring_widths,
-        recon_segments=all_standard_ring_widths,
-        min_segment_len=20,
-        max_segment_len=40,
-        shift_max=3,
-        n_jobs=-1  # use all available CPU cores
-    )
-
-    print(f"DP Optimal Weighted Correlation Score: {score:.3f}")
-    for start, end, angle_idx, r in segments:
-        print(f"Rings {start}-{end} → angle {angle_idx} → r = {r:.3f}")
-
-    plot_segment_marks_on_image(
-        image=image_recon,
-        center=center,
-        segments=segments,
-        angles=angles,
-        ring_boundaries_all=all_peaks,
-        pixel_step=0.5
-    )
-
-
-# Example usage:
+# Experiments
 if __name__ == "__main__":
-    # test_on_gaussian()
-    find_best_reconstruction_depth(seed=4)
+    # create phantoms and reconstructions
+    phantom_recon_1 = create_phantom_and_reconstruction(
+        seed=4, rot_deg_height=0, rot_deg_width=0, depth_sample_interval=20, cone_angle_deg=9)
+    phantom_recon_2 = create_phantom_and_reconstruction(
+        seed=4, rot_deg_height=8, rot_deg_width=0, depth_sample_interval=20, cone_angle_deg=9)
+    phantom_recon_3 = create_phantom_and_reconstruction(
+        seed=4, rot_deg_height=0, rot_deg_width=8, depth_sample_interval=20, cone_angle_deg=9)
+
+    find_best_reconstruction_depth(phantom_recon_1)
+    find_best_reconstruction_depth(phantom_recon_2)
+    find_best_reconstruction_depth(phantom_recon_3)
