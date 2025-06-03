@@ -103,7 +103,7 @@ def generate_wood_block(seed, resolution=(800, 600),
 
     if gaussian_blur > 0:
         # add gaussian blus to the wood rings
-        image = gaussian_filter(image, sigma=gaussian_blur)
+        image = util.img_as_ubyte(gaussian_filter(image, sigma=gaussian_blur))
 
     # create the 3d array by moving linearly over the strechted image with the original height window
     image3d = np.array([image[

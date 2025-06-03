@@ -65,6 +65,9 @@ def create_reconstruction(phantom, depth_sample_interval=20, num_projections=101
     astra.algorithm.run(sirt_id, iterations)
     recon = astra.data3d.get(recon_id)
 
+    # Comvert recon to unit8
+    recon = recon.astype(np.uint8)
+
     # Cleanup
     astra.data3d.delete([phantom_id, sinogram_id, recon_id])
     astra.algorithm.delete(sirt_id)

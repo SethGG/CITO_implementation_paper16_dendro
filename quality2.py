@@ -64,7 +64,7 @@ def extract_radial_profile(image, center, theta, radius, pixel_step=0.5):
 # Step 2: Derivative of radial profile to find ring boundaries
 
 
-def find_ring_boundaries(profile, smoothing_window=20, prominence=0.4):
+def find_ring_boundaries(profile, smoothing_window=20, prominence=0.1):
     if len(profile) < smoothing_window:
         return [], [], []
     derivative = savgol_filter(profile, window_length=smoothing_window, polyorder=1, deriv=1)
@@ -132,7 +132,7 @@ def plot_peak_detection(derivative_1, peaks_1, ring_widths_1, std_ring_widths_1,
 # Plot radial correlation and ring numbers in recontruction
 
 
-def plot_radial_correlation(angles, all_r, all_r_detrend, all_num_rings, image, image_recon):
+def plot_radial_correlation(angles, all_r, all_r_detrend, all_num_rings, limited_indexes, image, image_recon):
     fig = plt.figure(figsize=(12, 10))
     ax0 = fig.add_subplot(221)
     ax3 = fig.add_subplot(222)
@@ -141,7 +141,12 @@ def plot_radial_correlation(angles, all_r, all_r_detrend, all_num_rings, image, 
     ax2 = fig.add_subplot(236, polar=True)
 
     ax1.plot(angles, all_r, color='blue', label='Correlation (r)')
-    ax1.fill(angles, all_r, color='skyblue', alpha=0.3)
+    all_r_upper = all_r.copy()
+    all_r_upper[~limited_indexes] = 0
+    ax1.fill(angles, all_r_upper, color='skyblue', alpha=0.3)
+    all_r_lower = all_r.copy()
+    all_r_lower[limited_indexes] = 0
+    ax1.fill(angles, all_r_lower, color='lightcoral', alpha=0.3)
     ax1.set_theta_zero_location("E")  # 0° at the right
     ax1.set_theta_direction(-1)        # Counterclockwise
     # ax1.set_title("Radial correlation of ring widths to baseline profile")
@@ -187,31 +192,32 @@ def create_phantom_and_reconstruction(seed, rot_deg_height, rot_deg_width, depth
 
     # Load or generate phantom and center data
     if os.path.exists(phantom_path) and os.path.exists(center_path):
-        full_image3d = np.load(phantom_path)
-        full_slices_center = np.load(center_path)
+        image3d = np.load(phantom_path)
+        slices_center = np.load(center_path)
     else:
         full_image3d, full_slices_center = generate_wood_block(
             seed=seed, rot_deg_height=rot_deg_height, rot_deg_width=rot_deg_width, center_pith=True)
-        np.save(phantom_path, full_image3d)
-        np.save(center_path, full_slices_center)
+        # Subsample slices
+        image3d = full_image3d[::depth_sample_interval]
+        slices_center = full_slices_center[::depth_sample_interval]
 
-    # Subsample slices
-    image3d = full_image3d[::depth_sample_interval]
-    slices_center = full_slices_center[::depth_sample_interval]
+        np.save(phantom_path, image3d)
+        np.save(center_path, slices_center)
 
     # Load or generate reconstructions
     if os.path.exists(recon_path):
         recon3d = np.load(recon_path)
     else:
-        _, recon3d = create_reconstruction(full_image3d, depth_sample_interval=depth_sample_interval,
-                                           cone_angle_deg=cone_angle_deg)
+        _, full_recon3d = create_reconstruction(full_image3d, depth_sample_interval=depth_sample_interval,
+                                                cone_angle_deg=cone_angle_deg)
+        # Convert to uint8
+        recon3d = np.clip(full_recon3d, 0, 255).astype(np.uint8)
         np.save(recon_path, recon3d)
 
         # Save recon slices as images
         os.makedirs(recon_img_dir, exist_ok=True)
         for i, img in enumerate(recon3d):
-            img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
-            imageio.imwrite(os.path.join(recon_img_dir, f"recon_slice_{i:03d}.png"), img_uint8)
+            imageio.imwrite(os.path.join(recon_img_dir, f"recon_slice_{i:03d}.png"), img)
 
     return image3d, slices_center, recon3d
 
@@ -318,8 +324,12 @@ def find_best_reconstruction_depth(phantom_recon):
         slices_average_r.append(np.mean(all_r[~np.isnan(all_r)]))
 
         # Only for angles with r above the 50th percentile
-        threshold_r = np.percentile(all_r[~np.isnan(all_r)], 50)
-        limited_indexes = all_r > threshold_r
+        # threshold_r = np.percentile(all_r[~np.isnan(all_r)], 60)
+        # limited_indexes = all_r > threshold_r
+
+        # Only top 10 percentile ring numbers
+        threshold_num_rings = np.percentile(all_num_rings, 80)
+        limited_indexes = all_num_rings >= threshold_num_rings
         all_num_rings_limited = all_num_rings[limited_indexes]
         all_r_limited = all_r[limited_indexes]
 
@@ -328,7 +338,7 @@ def find_best_reconstruction_depth(phantom_recon):
             np.sum(all_ring_weigthed_r_limited[~np.isnan(all_ring_weigthed_r_limited)]))
         slices_average_r_limited.append(np.mean(all_r_limited[~np.isnan(all_r_limited)]))
 
-        # plot_radial_correlation(angles, all_r, all_ring_weigthed_r, all_num_rings,
+        # plot_radial_correlation(angles, all_r, all_ring_weigthed_r, all_num_rings, limited_indexes,
         #                        phantom_slice, recon_slice)
 
     plot_reconstruction_quality_summary(image3d, recon3d, slices_ring_weighted_r, slices_average_r,
@@ -344,7 +354,13 @@ if __name__ == "__main__":
         seed=4, rot_deg_height=8, rot_deg_width=0, depth_sample_interval=20, cone_angle_deg=9)
     phantom_recon_3 = create_phantom_and_reconstruction(
         seed=4, rot_deg_height=0, rot_deg_width=8, depth_sample_interval=20, cone_angle_deg=9)
+    phantom_recon_4 = create_phantom_and_reconstruction(
+        seed=4, rot_deg_height=0, rot_deg_width=10, depth_sample_interval=20, cone_angle_deg=9)
+    phantom_recon_5 = create_phantom_and_reconstruction(
+        seed=4, rot_deg_height=0, rot_deg_width=12, depth_sample_interval=20, cone_angle_deg=9)
 
-    find_best_reconstruction_depth(phantom_recon_1)
-    find_best_reconstruction_depth(phantom_recon_2)
-    find_best_reconstruction_depth(phantom_recon_3)
+    # find_best_reconstruction_depth(phantom_recon_1)
+    # find_best_reconstruction_depth(phantom_recon_2)
+    # find_best_reconstruction_depth(phantom_recon_3)
+    # find_best_reconstruction_depth(phantom_recon_4)
+    find_best_reconstruction_depth(phantom_recon_5)
