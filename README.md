@@ -22,7 +22,7 @@ To set up the environment, use Anaconda:
 conda env create -f environment.yml
 
 # Activate the environment
-conda activate tomography
+conda activate cito
 ```
 
 ---
